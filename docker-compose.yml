@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-family}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-family}
+      POSTGRES_DB: ${POSTGRES_DB:-family_finance}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./bot:/app/bot
+      - ./alembic.ini:/app/alembic.ini
+      - ./pyproject.toml:/app/pyproject.toml
+    command:
+      - watchfiles
+      - --filter
+      - python
+      - python -m bot.main
+      - /app/bot
+    stop_grace_period: 30s
+
+volumes:
+  postgres_data:
