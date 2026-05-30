@@ -9,9 +9,9 @@ from bot.db.models import Category
 from bot.services.classify_common import (
     CLASSIFY_MAX_TOKENS,
     CLASSIFY_SYSTEM,
+    build_batch_prompt,
     build_catalog,
-    build_prompt,
-    parse_classify,
+    parse_batch_classify,
 )
 from bot.services.schemas import ReceiptItemData
 
@@ -19,10 +19,10 @@ logger = get_logger(__name__)
 
 
 class ClaudeClassifier:
-    """Minimal single-item Claude classification step.
+    """Batch Claude classification step.
 
-    Instances are callable and satisfy the classifier's ClassifyFn
-    protocol: given an item, return (category_id, confidence).
+    Callable: given a list of items, returns a list of (category_id,
+    confidence) aligned by index — one LLM request for the whole batch.
     """
 
     def __init__(
@@ -35,8 +35,12 @@ class ClaudeClassifier:
         self._model = model
         self._catalog = build_catalog(categories)
 
-    async def __call__(self, item: ReceiptItemData) -> tuple[int | None, float]:
-        prompt = build_prompt(self._catalog, item.name)
+    async def __call__(
+        self, items: list[ReceiptItemData]
+    ) -> list[tuple[int | None, float]]:
+        if not items:
+            return []
+        prompt = build_batch_prompt(self._catalog, items)
         try:
             response = await self._client.messages.create(
                 model=self._model,
@@ -44,10 +48,10 @@ class ClaudeClassifier:
                 system=CLASSIFY_SYSTEM,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return parse_classify(self._first_text(response))
+            return parse_batch_classify(self._first_text(response), len(items))
         except (anthropic.APIError, json.JSONDecodeError, ValueError) as exc:
             logger.warning("claude classify failed", error=str(exc))
-            return None, 0.0
+            return [(None, 0.0)] * len(items)
 
     @staticmethod
     def _first_text(response: anthropic.types.Message) -> str:

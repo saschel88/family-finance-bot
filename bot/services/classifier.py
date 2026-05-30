@@ -21,16 +21,24 @@ NCT_NAME_CONFIDENCE = 0.9
 
 
 class ClassifyFn(Protocol):
-    """Injected LLM classification step: item -> (category_id, confidence).
+    """Injected LLM classification step (BATCH): a list of items -> a list of
+    (category_id, confidence) aligned by index.
 
-    Implemented per provider (ClaudeClassifier / GeminiClassifier).
+    Implemented per provider (ClaudeClassifier / GeminiClassifier). Batching
+    keeps it to one LLM request per receipt instead of one per item.
     """
 
-    async def __call__(self, item: ReceiptItemData) -> tuple[int | None, float]: ...
+    async def __call__(
+        self, items: list[ReceiptItemData]
+    ) -> list[tuple[int | None, float]]: ...
 
 
 class Classifier:
-    """Implements the receipt-item classification priority pipeline."""
+    """Implements the receipt-item classification priority pipeline.
+
+    Local, cheap steps (catalog, NCT, rules) run per item; the LLM fallback is
+    batched into a single request for all unresolved items.
+    """
 
     def __init__(self, nct: NctClient) -> None:
         self._nct = nct
@@ -42,17 +50,35 @@ class Classifier:
         claude: ClassifyFn | None = None,
     ) -> list[ClassifiedItem]:
         rules = await rule_repo.find_rules(session)
+
+        results: list[ClassifiedItem | None] = []
+        pending: list[tuple[int, ReceiptItemData]] = []
+        for item in items:
+            resolved = await self._resolve_local(session, item, rules)
+            results.append(resolved)
+            if resolved is None:
+                pending.append((len(results) - 1, item))
+
+        if pending and claude is not None:
+            preds = await claude([item for _, item in pending])
+            for (idx, item), pred in zip(pending, preds):
+                category_id, confidence = pred
+                results[idx] = await self._finalize_llm(
+                    session, item, category_id, confidence
+                )
+
         return [
-            await self._classify_one(session, item, rules, claude) for item in items
+            r if r is not None else self._uncertain(item)
+            for item, r in zip(items, results)
         ]
 
-    async def _classify_one(
+    async def _resolve_local(
         self,
         session: AsyncSession,
         item: ReceiptItemData,
         rules: list[ProductRule],
-        claude: ClassifyFn | None,
-    ) -> ClassifiedItem:
+    ) -> ClassifiedItem | None:
+        """Run the non-LLM steps; return None if the item needs the LLM."""
         gtin = normalize_gtin(item.barcode)
         ntin = normalize_ntin(item.ntin)
 
@@ -140,30 +166,46 @@ class Classifier:
                     source=source,
                 )
 
-        # 5. LLM classification fallback. Cache confident results that carry
-        #    an official identifier (GTIN or NTIN).
-        if claude is not None:
-            category_id, confidence = await claude(item)
-            if category_id is not None and confidence >= CONFIDENCE_THRESHOLD:
-                if gtin or ntin:
-                    await product_repo.upsert(
-                        session,
-                        category_id=category_id,
-                        name=item.name,
-                        source="llm",
-                        gtin=gtin,
-                        ntin=ntin,
-                    )
-                return ClassifiedItem(
-                    item=item,
-                    category_id=category_id,
-                    confidence=confidence,
-                    ntin=ntin,
-                    source="claude",
-                )
+        return None
 
-        # 6. Uncertain — needs user confirmation.
-        return ClassifiedItem(item=item, category_id=None, confidence=0.0, ntin=ntin)
+    async def _finalize_llm(
+        self,
+        session: AsyncSession,
+        item: ReceiptItemData,
+        category_id: int | None,
+        confidence: float,
+    ) -> ClassifiedItem:
+        """Turn a batched LLM prediction into a ClassifiedItem; cache confident
+        results that carry an official identifier (GTIN or NTIN)."""
+        ntin = normalize_ntin(item.ntin)
+        if category_id is not None and confidence >= CONFIDENCE_THRESHOLD:
+            gtin = normalize_gtin(item.barcode)
+            if gtin or ntin:
+                await product_repo.upsert(
+                    session,
+                    category_id=category_id,
+                    name=item.name,
+                    source="llm",
+                    gtin=gtin,
+                    ntin=ntin,
+                )
+            return ClassifiedItem(
+                item=item,
+                category_id=category_id,
+                confidence=confidence,
+                ntin=ntin,
+                source="claude",
+            )
+        return self._uncertain(item)
+
+    @staticmethod
+    def _uncertain(item: ReceiptItemData) -> ClassifiedItem:
+        return ClassifiedItem(
+            item=item,
+            category_id=None,
+            confidence=0.0,
+            ntin=normalize_ntin(item.ntin),
+        )
 
     @staticmethod
     def _match_rules(

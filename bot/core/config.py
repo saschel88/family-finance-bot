@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # Google Gemini / AI Studio (used when ai_provider == "gemini")
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    # Fallback model tried when the primary returns a retryable error (e.g.
+    # 429): each model has its own free-tier quota. Empty disables fallback.
+    gemini_fallback_model: str = "gemini-2.5-flash-lite"
 
     # PostgreSQL
     database_url: str = (

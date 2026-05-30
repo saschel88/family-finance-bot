@@ -7,6 +7,7 @@ from google import genai
 from google.genai import errors, types
 
 from bot.core.logging import get_logger
+from bot.services.gemini_call import generate_with_fallback
 from bot.services.schemas import ReceiptVisionResponse, VisionAPIError
 from bot.services.vision_common import parse_vision_response
 
@@ -59,9 +60,9 @@ class ReceiptTextParser(Protocol):
 
 
 class GeminiReceiptParser:
-    def __init__(self, client: genai.Client, model: str) -> None:
+    def __init__(self, client: genai.Client, models: list[str]) -> None:
         self._client = client
-        self._model = model
+        self._models = models
 
     async def parse(self, text: str) -> ReceiptVisionResponse:
         config = types.GenerateContentConfig(
@@ -71,8 +72,12 @@ class GeminiReceiptParser:
             temperature=0.0,
         )
         try:
-            response = await self._client.aio.models.generate_content(
-                model=self._model, contents=[text], config=config
+            response = await generate_with_fallback(
+                self._client,
+                self._models,
+                contents=[text],
+                config=config,
+                label="ofd parse",
             )
         except errors.APIError as exc:
             logger.error("ofd parse api error", code=exc.code)

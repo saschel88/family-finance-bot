@@ -24,7 +24,7 @@ _JSON = """
 
 
 async def test_parse_ofd_text_into_structure() -> None:
-    parser = GeminiReceiptParser(make_gemini(_JSON), "gemini-test")
+    parser = GeminiReceiptParser(make_gemini(_JSON), ["gemini-test"])
     result = await parser.parse("exact receipt text from OFD")
     assert result.total_amount == Decimal("26965.00")
     assert result.fiscal_id == "841061549277"

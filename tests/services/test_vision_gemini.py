@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -34,8 +35,14 @@ def _api_error(code: int) -> errors.APIError:
     return errors.ClientError(code, response)
 
 
+def _patch_sleep(mocker: Any) -> None:
+    import bot.services.gemini_call as gc
+
+    mocker.patch.object(gc.asyncio, "sleep", AsyncMock())
+
+
 async def test_happy_path() -> None:
-    service = GeminiVisionService(make_gemini(_VALID_JSON), "gemini-test")
+    service = GeminiVisionService(make_gemini(_VALID_JSON), ["gemini-test"])
     result = await service.extract(b"image-bytes")
     assert result.shop_name == "Магнум"
     assert result.total_amount == Decimal("1500.50")
@@ -44,49 +51,64 @@ async def test_happy_path() -> None:
 
 async def test_markdown_fenced_json_is_stripped() -> None:
     fenced = f"```json\n{_VALID_JSON}\n```"
-    service = GeminiVisionService(make_gemini(fenced), "gemini-test")
+    service = GeminiVisionService(make_gemini(fenced), ["gemini-test"])
     result = await service.extract(b"image-bytes")
     assert result.total_amount == Decimal("1500.50")
 
 
 async def test_garbage_raises_validation_error() -> None:
-    service = GeminiVisionService(make_gemini("not json"), "gemini-test")
+    service = GeminiVisionService(make_gemini("not json"), ["gemini-test"])
     with pytest.raises(VisionValidationError):
         await service.extract(b"image-bytes")
 
 
-async def test_retry_on_503_then_success(mocker: object) -> None:
-    import bot.services.vision_gemini as module
-
-    mocker.patch.object(module.asyncio, "sleep", AsyncMock())  # type: ignore[attr-defined]
+async def test_retry_on_503_then_success(mocker: Any) -> None:
+    _patch_sleep(mocker)
     client = make_gemini(_VALID_JSON)
     ok = MagicMock()
     ok.text = _VALID_JSON
     client.aio.models.generate_content = AsyncMock(
         side_effect=[_api_error(503), _api_error(503), ok]
     )
-    service = GeminiVisionService(client, "gemini-test")
+    service = GeminiVisionService(client, ["gemini-test"])
     result = await service.extract(b"image-bytes")
     assert result.total_amount == Decimal("1500.50")
     assert client.aio.models.generate_content.await_count == 3
 
 
+async def test_fallback_model_used_on_429(mocker: Any) -> None:
+    _patch_sleep(mocker)
+    used: list[str] = []
+
+    async def gen(*, model: str, contents: Any, config: Any) -> MagicMock:
+        used.append(model)
+        if model == "primary":
+            raise _api_error(429)
+        return MagicMock(text=_VALID_JSON)
+
+    client = MagicMock()
+    client.aio.models.generate_content = AsyncMock(side_effect=gen)
+    service = GeminiVisionService(client, ["primary", "fallback"])
+    result = await service.extract(b"image-bytes")
+    assert result.total_amount == Decimal("1500.50")
+    # Primary 429'd, fallback served it — within the same pass, no wait.
+    assert used == ["primary", "fallback"]
+
+
 async def test_non_retryable_error_raises_api_error() -> None:
     client = make_gemini(_VALID_JSON)
     client.aio.models.generate_content = AsyncMock(side_effect=_api_error(400))
-    service = GeminiVisionService(client, "gemini-test")
+    service = GeminiVisionService(client, ["gemini-test"])
     with pytest.raises(VisionAPIError):
         await service.extract(b"image-bytes")
     assert client.aio.models.generate_content.await_count == 1
 
 
-async def test_exhausted_retries_raises_api_error(mocker: object) -> None:
-    import bot.services.vision_gemini as module
-
-    mocker.patch.object(module.asyncio, "sleep", AsyncMock())  # type: ignore[attr-defined]
+async def test_exhausted_retries_raises_api_error(mocker: Any) -> None:
+    _patch_sleep(mocker)
     client = make_gemini(_VALID_JSON)
     client.aio.models.generate_content = AsyncMock(side_effect=_api_error(503))
-    service = GeminiVisionService(client, "gemini-test")
+    service = GeminiVisionService(client, ["gemini-test"])
     with pytest.raises(VisionAPIError):
         await service.extract(b"image-bytes")
     assert client.aio.models.generate_content.await_count == 3

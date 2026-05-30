@@ -116,8 +116,10 @@ async def test_rule_regex_match(
 async def test_claude_fallback_used(
     db_session: AsyncSession, seed_categories: list[Category]
 ) -> None:
-    async def claude(item: ReceiptItemData) -> tuple[int | None, float]:
-        return seed_categories[1].id, 0.8
+    async def claude(
+        items: list[ReceiptItemData],
+    ) -> list[tuple[int | None, float]]:
+        return [(seed_categories[1].id, 0.8) for _ in items]
 
     classifier = Classifier(_nct())
     [result] = await classifier.classify_items(
@@ -130,8 +132,10 @@ async def test_claude_fallback_used(
 async def test_low_confidence_returns_uncertain(
     db_session: AsyncSession, seed_categories: list[Category]
 ) -> None:
-    async def claude(item: ReceiptItemData) -> tuple[int | None, float]:
-        return seed_categories[1].id, 0.5
+    async def claude(
+        items: list[ReceiptItemData],
+    ) -> list[tuple[int | None, float]]:
+        return [(seed_categories[1].id, 0.5) for _ in items]
 
     classifier = Classifier(_nct())
     [result] = await classifier.classify_items(
@@ -139,6 +143,47 @@ async def test_low_confidence_returns_uncertain(
     )
     assert result.category_id is None
     assert result.source == "unknown"
+
+
+async def test_batch_llm_single_call_for_unresolved(
+    db_session: AsyncSession, seed_categories: list[Category]
+) -> None:
+    calls = 0
+
+    async def claude(
+        items: list[ReceiptItemData],
+    ) -> list[tuple[int | None, float]]:
+        nonlocal calls
+        calls += 1
+        return [(seed_categories[0].id, 0.9) for _ in items]
+
+    classifier = Classifier(_nct())
+    results = await classifier.classify_items(
+        db_session,
+        [_item("Товар A"), _item("Товар B"), _item("Товар C")],
+        claude=claude,
+    )
+    # All three unresolved items classified in a SINGLE batch call.
+    assert calls == 1
+    assert all(r.category_id == seed_categories[0].id for r in results)
+
+
+async def test_confident_llm_batch_result_is_cached(
+    db_session: AsyncSession, seed_categories: list[Category]
+) -> None:
+    async def claude(
+        items: list[ReceiptItemData],
+    ) -> list[tuple[int | None, float]]:
+        return [(seed_categories[1].id, 0.95) for _ in items]
+
+    classifier = Classifier(_nct())
+    await classifier.classify_items(
+        db_session, [_item("Загадка", barcode="555000222")], claude=claude
+    )
+    cached = await product_repo.get_by_gtin(db_session, "555000222")
+    assert cached is not None
+    assert cached.category_id == seed_categories[1].id
+    assert cached.source == "llm"
 
 
 async def test_all_miss_no_claude_returns_uncertain(
@@ -170,23 +215,6 @@ async def test_local_catalog_gtin_hit_first(
     assert result.source == "catalog_gtin"
     assert result.category_id == seed_categories[0].id
     assert result.canonical_name == "Молоко (каталог)"
-
-
-async def test_confident_llm_with_gtin_is_cached(
-    db_session: AsyncSession, seed_categories: list[Category]
-) -> None:
-    async def claude(item: ReceiptItemData) -> tuple[int | None, float]:
-        return seed_categories[1].id, 0.95
-
-    classifier = Classifier(_nct())
-    [result] = await classifier.classify_items(
-        db_session, [_item("Загадка", barcode="555000222")], claude=claude
-    )
-    assert result.source == "claude"
-    cached = await product_repo.get_by_gtin(db_session, "555000222")
-    assert cached is not None
-    assert cached.category_id == seed_categories[1].id
-    assert cached.source == "llm"
 
 
 async def test_nct_gtin_hit_is_cached(

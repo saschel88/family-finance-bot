@@ -60,7 +60,10 @@ async def test_photo_happy_path_saves_receipt(
     seed_categories: list[Category],
     test_owner_member: FamilyMember,
 ) -> None:
-    classify_json = f'{{"category_id": {seed_categories[0].id}, "confidence": 0.95}}'
+    classify_json = (
+        f'[{{"index": 0, "category_id": {seed_categories[0].id},'
+        ' "confidence": 0.95}]'
+    )
     context = _photo_context(
         make_context,
         session_factory,
@@ -91,7 +94,7 @@ async def test_photo_vision_failure_no_save(
         make_context,
         session_factory,
         vision_json="not json",
-        classify_json='{"category_id": null, "confidence": 0.0}',
+        classify_json="[]",
     )
     update = make_update(chat_id=test_owner_member.chat_id, photo=True)
 
@@ -112,7 +115,7 @@ async def test_photo_unregistered_user(
         make_context,
         session_factory,
         vision_json=_RECEIPT_JSON,
-        classify_json='{"category_id": null, "confidence": 0.0}',
+        classify_json="[]",
     )
     update = make_update(chat_id=99999, photo=True)
     await receipt.photo_handler(update, context)
@@ -224,8 +227,10 @@ async def test_category_callback_bad_data(
 
 
 def _fixed_classify(category_id: int) -> Callable[..., object]:
-    async def _fn(item: ReceiptItemData) -> tuple[int | None, float]:
-        return category_id, 0.9
+    async def _fn(
+        items: list[ReceiptItemData],
+    ) -> list[tuple[int | None, float]]:
+        return [(category_id, 0.9) for _ in items]
 
     return _fn
 
@@ -322,7 +327,10 @@ async def test_duplicate_receipt_rejected(
     seed_categories: list[Category],
     test_owner_member: FamilyMember,
 ) -> None:
-    classify_json = f'{{"category_id": {seed_categories[0].id}, "confidence": 0.95}}'
+    classify_json = (
+        f'[{{"index": 0, "category_id": {seed_categories[0].id},'
+        ' "confidence": 0.95}]'
+    )
     context = _photo_context(
         make_context,
         session_factory,
@@ -347,7 +355,10 @@ async def test_no_date_saves_now_and_prompts(
     seed_categories: list[Category],
     test_owner_member: FamilyMember,
 ) -> None:
-    classify_json = f'{{"category_id": {seed_categories[0].id}, "confidence": 0.95}}'
+    classify_json = (
+        f'[{{"index": 0, "category_id": {seed_categories[0].id},'
+        ' "confidence": 0.95}]'
+    )
     context = _photo_context(
         make_context,
         session_factory,

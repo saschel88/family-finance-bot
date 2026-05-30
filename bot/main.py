@@ -62,14 +62,19 @@ def build_ai_services(
         return vision, claude_factory, ofd_parser
 
     gemini_client = genai.Client(api_key=settings.gemini_api_key)
-    model = settings.gemini_model
-    vision = GeminiVisionService(gemini_client, model)
-    ofd_parser = GeminiReceiptParser(gemini_client, model)
+    models = [settings.gemini_model]
+    if (
+        settings.gemini_fallback_model
+        and settings.gemini_fallback_model != settings.gemini_model
+    ):
+        models.append(settings.gemini_fallback_model)
+    vision = GeminiVisionService(gemini_client, models)
+    ofd_parser = GeminiReceiptParser(gemini_client, models)
 
     def gemini_factory(cats: list[Category]) -> ClassifyFn:
-        return GeminiClassifier(gemini_client, model, cats)
+        return GeminiClassifier(gemini_client, models, cats)
 
-    logger.info("ai provider", provider="gemini", model=model)
+    logger.info("ai provider", provider="gemini", models=models)
     return vision, gemini_factory, ofd_parser
 
 
