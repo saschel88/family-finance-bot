@@ -1,0 +1,18 @@
+{
+  "categories": [
+    { "name": "Продукты", "emoji": "🛒", "oktru_code": "01" },
+    { "name": "Кафе и рестораны", "emoji": "🍕", "oktru_code": "56" },
+    { "name": "Аптека", "emoji": "💊", "oktru_code": "21" },
+    { "name": "Красота и гигиена", "emoji": "🧴", "oktru_code": "20" },
+    { "name": "Одежда и обувь", "emoji": "👕", "oktru_code": "14" },
+    { "name": "Дети", "emoji": "👶", "oktru_code": "88" },
+    { "name": "Дом и хозяйство", "emoji": "🏠", "oktru_code": "46" },
+    { "name": "Техника", "emoji": "📱", "oktru_code": "26" },
+    { "name": "Авто", "emoji": "⛽", "oktru_code": "45" },
+    { "name": "Образование", "emoji": "🎓", "oktru_code": "85" },
+    { "name": "Развлечения", "emoji": "🎭", "oktru_code": "93" },
+    { "name": "Путешествия", "emoji": "✈️", "oktru_code": "79" },
+    { "name": "Прочее", "emoji": "💰", "oktru_code": null }
+  ],
+  "nct_to_oktru": {}
+}

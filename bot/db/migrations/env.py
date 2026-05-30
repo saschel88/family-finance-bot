@@ -18,10 +18,9 @@ database_url = os.getenv("DATABASE_URL")
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url)
 
-# Wire in once bot.db.models defines Base:
-#   from bot.db.models import Base
-#   target_metadata = Base.metadata
-target_metadata = None
+from bot.db.models import Base
+
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:

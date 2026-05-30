@@ -20,7 +20,8 @@ Follow these conventions strictly and without exceptions.
 |---|---|---|
 | Python | CPython | 3.12+ |
 | Telegram | python-telegram-bot | 21.x (async) |
-| Claude API | anthropic SDK | ~0.40 |
+| Vision/LLM (default) | google-genai (Gemini) | ~1.x |
+| Vision/LLM (optional) | anthropic SDK (Claude) | ~0.49 |
 | ORM | SQLAlchemy | ~2.0 |
 | Migrations | Alembic | ~1.13 |
 | Database | PostgreSQL | 16 |
@@ -32,6 +33,18 @@ Follow these conventions strictly and without exceptions.
 | Containers | Docker + Docker Compose | latest |
 
 > All versions pinned in `pyproject.toml`. Use `uv` for dependency management — faster than pip, deterministic lockfile via `uv.lock`.
+
+### AI provider abstraction
+
+Receipt recognition (vision) and item classification run through a pluggable provider selected by `AI_PROVIDER` (`gemini` default, `claude` optional).
+
+- Shared contract: `bot/services/vision_common.py` (`VisionEngine` protocol, `SYSTEM_PROMPT`, `parse_vision_response`) and `bot/services/classify_common.py` (prompt + parse). The system prompt and the `ReceiptVisionResponse` schema are identical across providers.
+- Gemini (default): `vision_gemini.py` / `classify_gemini.py` via `google-genai` (`client.aio…`, `response_mime_type="application/json"`).
+- Claude (optional): `vision.py` / `claude_classify.py` via `anthropic`.
+- `bot/main.py::build_ai_services` constructs the engine + a `classify_factory` for the configured provider; handlers stay provider-agnostic (`bot_data["vision"]`, `bot_data["classify_factory"]`).
+- Both providers must: keep retries/backoff, validate JSON with Pydantic, and surface `VisionAPIError` / `VisionValidationError`.
+
+The "Claude Vision Prompt" section below remains the canonical prompt text — it is reused verbatim for Gemini.
 
 ---
 
@@ -110,14 +123,22 @@ used_at: datetime | None
 id: int (PK)
 family_member_id: int (FK → FamilyMember)
 shop_name: str | None
-purchased_at: datetime  — date from the receipt
+purchased_at: datetime  — from receipt; else user-supplied; else date added
 total_amount: Decimal
 currency: str  — "KZT" by default
 photo_file_id: str  — Telegram file_id
+fiscal_id: str | None  — receipt fiscal sign/number (КГД/ОФД), when printed
+dedup_key: str | None (unique)  — "{family_id}:{fiscal|content-fingerprint}"
 raw_claude_json: dict  — raw Claude response (JSONB)
 created_at: datetime
 updated_at: datetime
 ```
+**Purchase date**: taken from the receipt; if absent, the receipt is saved with
+the current date and the user is offered buttons / free-text to set it; if the
+user does not respond, the added date stands.
+**Uniqueness (dedup)**: a receipt is counted once per family. `dedup_key` =
+`family_id` + fiscal id (preferred) or a content fingerprint
+(shop+total+items). Enforced by the unique constraint and an upfront check.
 
 ### ReceiptItem
 ```
@@ -157,6 +178,22 @@ usage_count: int
 created_at: datetime
 ```
 
+### Product  (local catalog, global / shared across families)
+```
+id: int (PK)
+gtin: str | None  (unique)  — international barcode from the receipt
+ntin: str | None  (unique)  — NTIN/KZTIN national code from NCT
+name: str                   — canonical product name
+category_id: int (FK → Category)
+source: str  — "manual" | "nct" | "llm"  (overwrite precedence manual>nct>llm)
+usage_count: int
+created_at: datetime
+updated_at: datetime
+```
+Constraint: at least one of gtin/ntin must be non-null. Used as the first
+classification step to avoid external National Catalog calls; see
+"Classification priority".
+
 ### ExchangeRate
 ```
 id: int (PK)
@@ -172,7 +209,7 @@ created_at: datetime
 Always define these indexes explicitly in Alembic migrations:
 ```
 FamilyMember: chat_id (unique), family_id
-Receipt: family_member_id, purchased_at
+Receipt: family_member_id, purchased_at, dedup_key (unique)
 ReceiptItem: receipt_id, category_id, nct_code
 ProductRule: pattern, category_id
 ExchangeRate: (from_currency, rate_date) unique
@@ -321,13 +358,21 @@ NCT is used to enrich receipt items with standardized product data and improve c
 
 ### Classification priority (classifier.py)
 ```
-1. NCT lookup by GTIN (from receipt barcode if available) → category
-2. NCT search by product name → category (if confidence > 0.85)
-3. ProductRule exact match → category
-4. ProductRule contains/regex match → category
-5. Claude classify → category suggestion
-6. confidence < 0.7 → ask user via inline buttons
+1. Local product catalog by GTIN  → category (no external call)
+2. NCT lookup by GTIN (external)   → category, cached into local catalog
+3. NCT search by name (external, conf > 0.85) → category, cached
+4. ProductRule exact match (name)  → category
+5. ProductRule contains/regex (name) → category
+6. LLM classify (name) → suggestion; confident GTIN result cached into catalog
+7. confidence < 0.7 → ask user via inline buttons
 ```
+
+Local-catalog-first minimizes external National Catalog calls. The catalog
+(`product` table, global) is populated from manual confirmations, NCT hits, and
+confident LLM-by-GTIN results (precedence manual > nct > llm). On a catalog/NCT
+hit the canonical product name replaces noisy OCR text. Manual category
+confirmations are remembered by identifier (`product`) when a GTIN/NTIN is
+present, otherwise by name (`ProductRule`).
 
 ### services/nct.py responsibilities
 - `search_by_name(name: str) -> list[NctProduct]` — search NCT by product name
@@ -401,18 +446,31 @@ Photo of a receipt — main flow, no command needed.
 ```
 1. User sends a photo
 2. handlers/receipt.py — receives it, sends "обрабатываю..." message
-3. services/vision.py — Claude Vision → ReceiptVisionResponse (validated Pydantic)
+3. Receipt source (OFD-first):
+   a. services/qr.py — decode the receipt QR; if it is an OFD consumer link,
+      parse {i=fiscal sign, f=KKM reg.no, s=sum, t=datetime} (OfdRef)
+   b. services/ofd.py — fetch the authoritative receipt text from the OFD
+      consumer API (per operator: wofd, …); found=1 also proves authenticity.
+      Runtime uses httpx only. To onboard a new operator, discover its hidden
+      JSON endpoint with the dev tool scripts/ofd_probe.py (Playwright, dev-only,
+      captures the portal's XHR) and add it to ofd.py's _ENDPOINTS.
+   c. services/receipt_text.py — LLM-parse that exact text →
+      ReceiptVisionResponse (items carry GTIN and NTIN)
+   d. fallback: services/vision* — Gemini/Claude Vision on the image when there
+      is no QR or the OFD is unavailable
 4. services/classifier.py — for each item:
-   a. NCT lookup by GTIN (if barcode present) → category
-   b. NCT search by name (confidence > 0.85) → category
-   c. ProductRule exact match → category
-   d. ProductRule contains/regex → category
-   e. Claude classify → category suggestion
-   f. confidence < 0.7 → ask user (inline buttons)
-5. repository/receipt.py — save receipt and items in single transaction
-6. Telegram reply — summary with items and categories
-7. If uncertain items exist — inline buttons for confirmation
-8. User confirms → update ReceiptItem, add ProductRule
+   a. local catalog by GTIN → NTIN (no external call)
+   b. NCT by GTIN / by name (>0.85) → category, cached into catalog
+   c. ProductRule exact → contains → regex (name)
+   d. LLM classify; confident GTIN/NTIN result cached into catalog
+   e. confidence < 0.7 → ask user (inline buttons)
+5. dedup: services/dedup.py — per-family dedup_key (QR ids > fiscal id >
+   content fingerprint); existing key → skip (don't double-count)
+6. purchase date: from source; else save with today + offer date buttons/text
+7. repository/receipt.py — save receipt and items in single transaction
+8. Telegram reply — summary (canonical names when known) + categories
+9. Uncertain items → inline buttons; user confirms → learn by GTIN/NTIN
+   (Product catalog) or by name (ProductRule)
 ```
 
 ---

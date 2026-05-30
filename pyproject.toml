@@ -17,6 +17,9 @@ dependencies = [
     "structlog>=24.0.0,<25.0.0",
     "httpx>=0.27.0,<0.28.0",
     "watchfiles>=0.21.0,<1.0.0",
+    "google-genai>=1.2.0",
+    "zxing-cpp>=3.0.0",
+    "pillow>=12.2.0",
 ]
 
 [dependency-groups]
@@ -30,6 +33,10 @@ dev = [
     "pytest-postgresql>=6.0.0,<7.0.0",
     "pytest-mock>=3.14.0,<4.0.0",
     "respx>=0.21.0,<1.0.0",
+    # psycopg (v3) is required by pytest-postgresql to manage test databases.
+    # The app itself uses asyncpg only; this is a dev/test tooling dependency.
+    "psycopg[binary]>=3.1.0,<4.0.0",
+    "playwright>=1.60.0",
 ]
 
 [build-system]
@@ -73,6 +80,16 @@ plugins = ["pydantic.mypy"]
 module = "tests.*"
 disallow_untyped_defs = false
 
+# google-genai ships without a py.typed marker.
+[[tool.mypy.overrides]]
+module = ["google.genai.*", "google.*"]
+ignore_missing_imports = true
+
+# zxing-cpp (QR decoding) ships without type stubs.
+[[tool.mypy.overrides]]
+module = ["zxingcpp"]
+ignore_missing_imports = true
+
 # ---------------------------------------------------------------------------
 # Test runner
 # ---------------------------------------------------------------------------
@@ -80,6 +97,7 @@ disallow_untyped_defs = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = [
     "-ra",
     "--strict-markers",

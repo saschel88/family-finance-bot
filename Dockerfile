@@ -22,8 +22,9 @@ COPY pyproject.toml uv.lock* ./
 RUN uv sync --frozen --no-install-project --no-dev
 
 # Copy the project sources and install the package itself.
+# README.md is required by the hatchling build backend (pyproject `readme`).
 COPY bot ./bot
-COPY alembic.ini ./
+COPY alembic.ini README.md ./
 RUN uv sync --frozen --no-dev
 
 CMD ["python", "-m", "bot.main"]
