@@ -131,13 +131,19 @@ def build_application() -> Application:  # type: ignore[type-arg]
     application.add_handler(CommandHandler("invite", commands.invite))
     application.add_handler(CommandHandler("report", reports.report_command))
     application.add_handler(CommandHandler("add", reports.add_command))
-    application.add_handler(CommandHandler("categories", commands.categories))
+    application.add_handler(CommandHandler("categories", reports.categories_menu))
     application.add_handler(CommandHandler("learn", commands.learn))
     application.add_handler(CommandHandler("rate", commands.rate))
     application.add_handler(CommandHandler("help", commands.help_command))
     application.add_handler(MessageHandler(filters.PHOTO, receipt.photo_handler))
     application.add_handler(
         CallbackQueryHandler(receipt.category_callback, pattern="^cat:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(receipt.category_drill_callback, pattern="^catd:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(receipt.category_back_callback, pattern="^catb:")
     )
     application.add_handler(
         CallbackQueryHandler(receipt.date_callback, pattern="^rdate:")
@@ -147,6 +153,7 @@ def build_application() -> Application:  # type: ignore[type-arg]
     application.add_handler(
         CallbackQueryHandler(reports.add_cat_callback, pattern="^add:")
     )
+    application.add_handler(CallbackQueryHandler(reports.cm_callback, pattern="^cm:"))
     # Free-text capture runs in separate groups so each no-ops unless its own
     # pending state is set (and never steals onboarding text).
     application.add_handler(

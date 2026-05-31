@@ -45,19 +45,71 @@ def date_keyboard(receipt_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def category_keyboard(
-    item_id: int, categories: list[Category], columns: int = 2
-) -> InlineKeyboardMarkup:
-    """Inline keyboard to pick a category for an uncertain receipt item.
+def _grid(
+    buttons: list[InlineKeyboardButton], columns: int
+) -> list[list[InlineKeyboardButton]]:
+    return [buttons[i : i + columns] for i in range(0, len(buttons), columns)]
 
-    callback_data format: ``cat:{item_id}:{category_id}``.
+
+def category_tree_keyboard(
+    item_id: int,
+    categories: list[Category],
+    *,
+    sel: str = "cat",
+    drill: str = "catd",
+    columns: int = 2,
+) -> InlineKeyboardMarkup:
+    """Top-level category picker with drill-down into subcategories.
+
+    A category that has children gets a "▸" button that drills in (``drill``);
+    a leaf selects directly (``sel``). Callback format:
+    ``{sel}:{item_id}:{category_id}`` / ``{drill}:{item_id}:{parent_id}``.
     """
+    parents_with_children = {c.parent_id for c in categories if c.parent_id is not None}
+    buttons: list[InlineKeyboardButton] = []
+    for c in categories:
+        if c.parent_id is not None:
+            continue  # top-level only at this level
+        if c.id in parents_with_children:
+            buttons.append(
+                InlineKeyboardButton(
+                    f"{c.emoji} {c.name} ▸",
+                    callback_data=f"{drill}:{item_id}:{c.id}",
+                )
+            )
+        else:
+            buttons.append(
+                InlineKeyboardButton(
+                    f"{c.emoji} {c.name}", callback_data=f"{sel}:{item_id}:{c.id}"
+                )
+            )
+    return InlineKeyboardMarkup(_grid(buttons, columns))
+
+
+def category_children_keyboard(
+    item_id: int,
+    parent: Category,
+    children: list[Category],
+    *,
+    sel: str = "cat",
+    back: str = "catb",
+    columns: int = 2,
+) -> InlineKeyboardMarkup:
+    """Subcategory picker: children + "‹parent› (общее)" + back."""
     buttons = [
         InlineKeyboardButton(
-            f"{c.emoji} {c.name}",
-            callback_data=f"cat:{item_id}:{c.id}",
+            f"{c.emoji} {c.name}", callback_data=f"{sel}:{item_id}:{c.id}"
         )
-        for c in categories
+        for c in children
     ]
-    rows = [buttons[i : i + columns] for i in range(0, len(buttons), columns)]
+    rows = _grid(buttons, columns)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                f"{parent.emoji} {parent.name} (общее)",
+                callback_data=f"{sel}:{item_id}:{parent.id}",
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton("‹ Назад", callback_data=f"{back}:{item_id}")])
     return InlineKeyboardMarkup(rows)

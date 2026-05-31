@@ -15,7 +15,11 @@ from bot.db.repository import member as member_repo
 from bot.db.repository import product as product_repo
 from bot.db.repository import receipt as receipt_repo
 from bot.db.repository import rule as rule_repo
-from bot.handlers.keyboards import category_keyboard, date_keyboard
+from bot.handlers.keyboards import (
+    category_children_keyboard,
+    category_tree_keyboard,
+    date_keyboard,
+)
 from bot.services.classifier import Classifier, ClassifyFn
 from bot.services.dedup import compute_dedup_key
 from bot.services.exchange import ExchangeService
@@ -100,12 +104,19 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         async with factory() as session:
             async with session.begin():
-                cats = await category_repo.list_categories(session)
+                # Auto-classification uses only top-level categories (system +
+                # the family's own); subcategories are assigned manually.
+                top_level = await category_repo.list_top_level(
+                    session, member.family_id
+                )
+                family_cats = await category_repo.list_for_family(
+                    session, member.family_id
+                )
                 classify_factory: Callable[[list[Category]], ClassifyFn] = (
                     context.bot_data["classify_factory"]
                 )
                 classified = await classifier.classify_items(
-                    session, vision_data.items, classify_factory(cats)
+                    session, vision_data.items, classify_factory(top_level)
                 )
                 rows = await _build_rows(classified, vision_data, exchange)
                 receipt = await receipt_repo.save_receipt_with_items(
@@ -123,7 +134,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 )
                 saved_items = list(receipt.items)
                 receipt_id = receipt.id
-            cat_by_id = {c.id: c for c in cats}
+            cat_by_id = {c.id: c for c in family_cats}
     except IntegrityError:
         # Lost a race on the unique dedup_key — another upload won.
         await status_msg.edit_text(_DUPLICATE)
@@ -137,7 +148,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if classified_item.category_id is None:
             await update.message.reply_text(
                 f"Выберите категорию для: {item_model.name}",
-                reply_markup=category_keyboard(item_model.id, cats),
+                reply_markup=category_tree_keyboard(item_model.id, family_cats),
             )
 
     # If the receipt had no date, it was saved with "now"; let the user fix it.
@@ -170,12 +181,15 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             if item is None:
                 await query.edit_message_text("Позиция не найдена.")
                 return
-            # Remember the correction: by identifier when available
-            # (robust to bad OCR), otherwise by name.
+            # Learn at the TOP-LEVEL category (auto-classification never picks
+            # subcategories); the item itself keeps the chosen (sub)category.
+            learn_category_id = await category_repo.top_level_ancestor(
+                session, category_id
+            )
             if item.gtin or item.ntin:
                 await product_repo.upsert(
                     session,
-                    category_id=category_id,
+                    category_id=learn_category_id,
                     name=item.name,
                     source="manual",
                     gtin=item.gtin,
@@ -183,11 +197,58 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 )
             else:
                 await rule_repo.upsert_exact(
-                    session, pattern=item.name, category_id=category_id
+                    session, pattern=item.name, category_id=learn_category_id
                 )
             category = await category_repo.get_category(session, category_id)
     label = f"{category.emoji} {category.name}" if category else "категория"
     await query.edit_message_text(f"✅ {item.name} → {label}")
+
+
+async def category_drill_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Open subcategories of a tapped parent (photo-flow category buttons)."""
+    query = update.callback_query
+    assert query is not None and query.data is not None
+    await query.answer()
+    try:
+        _, raw_item_id, raw_parent_id = query.data.split(":")
+        item_id, parent_id = int(raw_item_id), int(raw_parent_id)
+    except ValueError:
+        return
+    factory = context.bot_data["session_factory"]
+    async with factory() as session:
+        parent = await category_repo.get_category(session, parent_id)
+        children = await category_repo.list_children(session, parent_id)
+    if parent is None:
+        return
+    await query.edit_message_reply_markup(
+        reply_markup=category_children_keyboard(item_id, parent, children)
+    )
+
+
+async def category_back_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Return to the top-level category list (photo-flow category buttons)."""
+    query = update.callback_query
+    assert query is not None and query.data is not None and update.effective_chat
+    await query.answer()
+    try:
+        item_id = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        return
+    factory = context.bot_data["session_factory"]
+    async with factory() as session:
+        member = await member_repo.get_member_by_chat_id(
+            session, update.effective_chat.id
+        )
+        if member is None:
+            return
+        family_cats = await category_repo.list_for_family(session, member.family_id)
+    await query.edit_message_reply_markup(
+        reply_markup=category_tree_keyboard(item_id, family_cats)
+    )
 
 
 _DATE_FORMATS = ("%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d", "%d.%m.%y")

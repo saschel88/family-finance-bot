@@ -81,12 +81,17 @@ class FamilyInvite(Base):
 
 class Category(Base):
     __tablename__ = "category"
+    __table_args__ = (Index("ix_category_family_id", "family_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255))
     emoji: Mapped[str] = mapped_column(String(16))
     parent_id: Mapped[int | None] = mapped_column(
         ForeignKey("category.id"), nullable=True
+    )
+    # NULL = system (shared by all); set = a family's own custom category.
+    family_id: Mapped[int | None] = mapped_column(
+        ForeignKey("family.id"), nullable=True
     )
     is_system: Mapped[bool] = mapped_column(default=False)
     # oktru_code drives NCT category mapping (see nct_category_map.json).

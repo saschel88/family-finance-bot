@@ -136,21 +136,52 @@ class Reporter:
         async with self._session_factory() as session:
             member_ids = await self._resolve_member_ids(session, member, scope)
             totals = await receipt_repo.sum_by_category(session, member_ids, start, end)
-            categories = {c.id: c for c in await category_repo.list_categories(session)}
+            cats = await category_repo.list_for_family(session, member.family_id)
+        by_id = {c.id: c for c in cats}
+
+        def root_of(category_id: int) -> int:
+            cat = by_id.get(category_id)
+            seen: set[int] = set()
+            while cat is not None and cat.parent_id is not None and cat.id not in seen:
+                seen.add(cat.id)
+                cat = by_id.get(cat.parent_id)
+            return cat.id if cat is not None else category_id
+
+        # Roll subcategory spending up into the top-level category.
+        top_total: dict[int | None, Decimal] = {}
+        sub_total: dict[tuple[int, int], Decimal] = {}
+        for ct in totals:
+            if ct.category_id is None:
+                top_total[None] = top_total.get(None, Decimal(0)) + ct.total
+                continue
+            root_id = root_of(ct.category_id)
+            top_total[root_id] = top_total.get(root_id, Decimal(0)) + ct.total
+            if root_id != ct.category_id:  # spending on a subcategory
+                sub_total[(root_id, ct.category_id)] = ct.total
 
         lines: list[ReportLine] = []
         grand_total = Decimal(0)
-        for ct in totals:
-            grand_total += ct.total
-            cat = categories.get(ct.category_id) if ct.category_id else None
+        ordered = sorted(top_total.items(), key=lambda kv: kv[1], reverse=True)
+        for top_id, total in ordered:
+            grand_total += total
+            cat = by_id.get(top_id) if top_id is not None else None
             lines.append(
                 ReportLine(
                     category_name=cat.name if cat else "Без категории",
                     emoji=cat.emoji if cat else "❓",
-                    total=ct.total,
+                    total=total,
                 )
             )
-        lines.sort(key=lambda line: line.total, reverse=True)
+            subs = [(cid, t) for (r, cid), t in sub_total.items() if r == top_id]
+            for cid, t in sorted(subs, key=lambda kv: kv[1], reverse=True):
+                sub = by_id.get(cid)
+                lines.append(
+                    ReportLine(
+                        category_name=f"↳ {sub.name if sub else ''}",
+                        emoji="",
+                        total=t,
+                    )
+                )
         return Report(
             title=title,
             scope=scope,

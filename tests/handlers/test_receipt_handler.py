@@ -449,3 +449,90 @@ async def test_date_text_handler_parses_manual_date(
     assert rcpt is not None
     assert rcpt.purchased_at.date() == date(2026, 5, 15)
     assert "awaiting_receipt_date" not in context.user_data
+
+
+async def test_manual_subcategory_learns_parent(
+    make_context: Callable[..., MagicMock],
+    session_factory: async_sessionmaker[AsyncSession],
+    seed_categories: list[Category],
+    test_owner_member: FamilyMember,
+    db_session: AsyncSession,
+) -> None:
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from bot.db.repository import category as category_repo
+
+    deti = next(c for c in seed_categories if c.name == "Дети")
+    ilya = await category_repo.create_category(
+        db_session,
+        name="Илья",
+        family_id=test_owner_member.family_id,
+        parent_id=deti.id,
+    )
+    await db_session.commit()
+    saved = await receipt_repo.save_receipt_with_items(
+        db_session,
+        member_id=test_owner_member.id,
+        shop_name="Shop",
+        purchased_at=datetime(2026, 5, 1, tzinfo=UTC),
+        total_amount=Decimal("100"),
+        currency="KZT",
+        photo_file_id="f",
+        raw_claude_json={},
+        items=[
+            receipt_repo.ItemRow(
+                name="Игрушка",
+                quantity=Decimal(1),
+                unit_price=Decimal("100"),
+                total_price=Decimal("100"),
+                gtin="4870001112223",
+            )
+        ],
+    )
+    await db_session.commit()
+    item_id = saved.items[0].id
+
+    context = make_context()
+    update = make_update(callback_data=f"cat:{item_id}:{ilya.id}")
+    await receipt.category_callback(update, context)
+
+    async with session_factory() as session:
+        product = await product_repo.get_by_gtin(session, "4870001112223")
+        item = (
+            await session.execute(select(ReceiptItem).where(ReceiptItem.id == item_id))
+        ).scalar_one()
+    # Item keeps the subcategory; catalog learned the PARENT (top-level).
+    assert item.category_id == ilya.id
+    assert product is not None
+    assert product.category_id == deti.id
+
+
+async def test_category_drill_and_back_callbacks(
+    make_context: Callable[..., MagicMock],
+    session_factory: async_sessionmaker[AsyncSession],
+    seed_categories: list[Category],
+    test_owner_member: FamilyMember,
+    db_session: AsyncSession,
+) -> None:
+    from bot.db.repository import category as category_repo
+
+    deti = next(c for c in seed_categories if c.name == "Дети")
+    await category_repo.create_category(
+        db_session,
+        name="Илья",
+        family_id=test_owner_member.family_id,
+        parent_id=deti.id,
+    )
+    await db_session.commit()
+    context = make_context()
+
+    drill = make_update(
+        chat_id=test_owner_member.chat_id, callback_data=f"catd:1:{deti.id}"
+    )
+    await receipt.category_drill_callback(drill, context)
+    drill.callback_query.edit_message_reply_markup.assert_awaited()
+
+    back = make_update(chat_id=test_owner_member.chat_id, callback_data="catb:1")
+    await receipt.category_back_callback(back, context)
+    back.callback_query.edit_message_reply_markup.assert_awaited()

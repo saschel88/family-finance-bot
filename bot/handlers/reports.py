@@ -23,6 +23,7 @@ from bot.db.models import Category, FamilyMember, Receipt
 from bot.db.repository import category as category_repo
 from bot.db.repository import member as member_repo
 from bot.db.repository import receipt as receipt_repo
+from bot.handlers.keyboards import category_children_keyboard, category_tree_keyboard
 from bot.services.money import format_money
 from bot.services.reporter import (
     PERIOD_LABELS,
@@ -333,21 +334,32 @@ async def rcp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.edit_message_reply_markup(reply_markup=_item_menu(int(parts[2])))
         return
 
-    if action == "ic":  # item category — show category keyboard
+    if action == "ic":  # item category — top-level picker with drill-down
         item_id = int(parts[2])
         async with factory() as session:
-            cats = await category_repo.list_categories(session)
-        buttons = [
-            InlineKeyboardButton(
-                f"{c.emoji} {c.name}", callback_data=f"rcp:sc:{item_id}:{c.id}"
+            family_cats = await category_repo.list_for_family(session, member.family_id)
+        await query.edit_message_reply_markup(
+            reply_markup=category_tree_keyboard(
+                item_id, family_cats, sel="rcp:sc", drill="rcp:scd"
             )
-            for c in cats
-        ]
-        grid = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(grid))
+        )
         return
 
-    if action == "sc":  # set category
+    if action == "scd":  # drill into a parent's subcategories
+        item_id, parent_id = int(parts[2]), int(parts[3])
+        async with factory() as session:
+            parent = await category_repo.get_category(session, parent_id)
+            children = await category_repo.list_children(session, parent_id)
+        if parent is None:
+            return
+        await query.edit_message_reply_markup(
+            reply_markup=category_children_keyboard(
+                item_id, parent, children, sel="rcp:sc", back="rcp:ic"
+            )
+        )
+        return
+
+    if action == "sc":  # set category (leaf or "parent (общее)")
         item_id, cat_id = int(parts[2]), int(parts[3])
         async with factory() as session:
             async with session.begin():
@@ -441,7 +453,7 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     factory = context.bot_data["session_factory"]
     async with factory() as session:
-        cats = await category_repo.list_categories(session)
+        cats = await category_repo.list_top_level(session, member.family_id)
     buttons = [
         InlineKeyboardButton(f"{c.emoji} {c.name}", callback_data=f"add:cat:{c.id}")
         for c in cats
@@ -450,6 +462,159 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(
         "Выберите категорию покупки:", reply_markup=InlineKeyboardMarkup(grid)
     )
+
+
+# --- category management ----------------------------------------------------
+def _category_tree_text(cats: list[Category]) -> str:
+    tops = [c for c in cats if c.parent_id is None]
+    children: dict[int, list[Category]] = {}
+    for c in cats:
+        if c.parent_id is not None:
+            children.setdefault(c.parent_id, []).append(c)
+    lines = ["📂 Категории (своя — добавлена вами):"]
+    for t in tops:
+        tag = "" if t.family_id is None else " · своя"
+        lines.append(f"{t.emoji} {t.name}{tag}")
+        for ch in children.get(t.id, []):
+            lines.append(f"   ↳ {ch.emoji} {ch.name}")
+    return "\n".join(lines)
+
+
+def _categories_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("➕ Категория", callback_data="cm:addtop")],
+            [InlineKeyboardButton("➕ Подкатегория", callback_data="cm:addsubpick")],
+            [InlineKeyboardButton("✏ / 🗑 Изменить свои", callback_data="cm:editlist")],
+        ]
+    )
+
+
+async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.effective_chat is not None and update.message is not None
+    member = await _member(context, update.effective_chat.id)
+    if member is None:
+        await update.message.reply_text("Сначала зарегистрируйтесь через /start.")
+        return
+    factory = context.bot_data["session_factory"]
+    async with factory() as session:
+        cats = await category_repo.list_for_family(session, member.family_id)
+    await update.message.reply_text(
+        _category_tree_text(cats), reply_markup=_categories_keyboard()
+    )
+
+
+async def cm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    assert query is not None and query.data is not None and update.effective_chat
+    await query.answer()
+    member = await _member(context, update.effective_chat.id)
+    if member is None:
+        return
+    parts = query.data.split(":")
+    action = parts[1]
+    factory = context.bot_data["session_factory"]
+
+    if action == "addtop":
+        if context.user_data is not None:
+            context.user_data[_PENDING] = {"kind": "cat_add", "parent_id": None}
+        await query.edit_message_text("Введите название новой категории:")
+        return
+
+    if action == "addsubpick":
+        async with factory() as session:
+            tops = await category_repo.list_top_level(session, member.family_id)
+        buttons = [
+            InlineKeyboardButton(
+                f"{c.emoji} {c.name}", callback_data=f"cm:addsub:{c.id}"
+            )
+            for c in tops
+        ]
+        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+        await query.edit_message_text(
+            "Выберите родительскую категорию:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if action == "addsub":
+        if context.user_data is not None:
+            context.user_data[_PENDING] = {
+                "kind": "cat_add",
+                "parent_id": int(parts[2]),
+            }
+        await query.edit_message_text("Введите название подкатегории:")
+        return
+
+    if action == "editlist":
+        async with factory() as session:
+            cats = await category_repo.list_for_family(session, member.family_id)
+        custom = [c for c in cats if c.family_id is not None]
+        if not custom:
+            await query.edit_message_text(
+                "У вас пока нет своих категорий. Добавьте через ➕."
+            )
+            return
+        buttons = [
+            InlineKeyboardButton(f"{c.emoji} {c.name}", callback_data=f"cm:edit:{c.id}")
+            for c in custom
+        ]
+        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+        await query.edit_message_text(
+            "Ваши категории — выберите для изменения:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if action == "edit":
+        cid = parts[2]
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "✏ Переименовать", callback_data=f"cm:ren:{cid}"
+                        ),
+                        InlineKeyboardButton(
+                            "🗑 Удалить", callback_data=f"cm:del:{cid}"
+                        ),
+                    ],
+                    [InlineKeyboardButton("‹ Назад", callback_data="cm:editlist")],
+                ]
+            )
+        )
+        return
+
+    if action == "ren":
+        if context.user_data is not None:
+            context.user_data[_PENDING] = {"kind": "cat_rename", "id": int(parts[2])}
+        await query.edit_message_text("Введите новое название:")
+        return
+
+    if action == "del":
+        cid = parts[2]
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "✅ Удалить", callback_data=f"cm:delc:{cid}"
+                        ),
+                        InlineKeyboardButton("Отмена", callback_data=f"cm:edit:{cid}"),
+                    ]
+                ]
+            )
+        )
+        return
+
+    if action == "delc":
+        async with factory() as session:
+            async with session.begin():
+                ok = await category_repo.delete_category(session, int(parts[2]))
+        await query.edit_message_text(
+            "🗑 Категория удалена." if ok else "Нельзя удалить системную категорию."
+        )
+        return
 
 
 async def add_cat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -494,6 +659,41 @@ async def report_text_handler(
             context, member, "custom", pending["scope"], pending["mode"], 0
         )
         await update.message.reply_text(view[0], reply_markup=view[1])
+        return
+
+    if kind == "cat_add":
+        new_name = text.strip()
+        if not new_name:
+            await update.message.reply_text("Название не может быть пустым.")
+            return
+        async with factory() as session:
+            async with session.begin():
+                await category_repo.create_category(
+                    session,
+                    name=new_name,
+                    family_id=member.family_id,
+                    parent_id=pending.get("parent_id"),
+                )
+        context.user_data.pop(_PENDING, None)
+        await update.message.reply_text(f"✅ Категория добавлена: {new_name}")
+        return
+
+    if kind == "cat_rename":
+        new_name = text.strip()
+        if not new_name:
+            await update.message.reply_text("Название не может быть пустым.")
+            return
+        async with factory() as session:
+            async with session.begin():
+                renamed = await category_repo.rename_category(
+                    session, pending["id"], new_name
+                )
+        context.user_data.pop(_PENDING, None)
+        await update.message.reply_text(
+            f"✏ Переименовано: {new_name}"
+            if renamed is not None
+            else "Системную категорию нельзя переименовать."
+        )
         return
 
     if kind == "rdate":

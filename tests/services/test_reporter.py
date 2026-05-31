@@ -240,3 +240,42 @@ async def test_total_and_by_day_modes(
     by = {d.day: d.total for d in days}
     assert by[date(2026, 5, 2)] == Decimal("150.00")
     assert by[date(2026, 5, 5)] == Decimal("30.00")
+
+
+async def test_by_category_rollup_with_subcategories(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    seed_categories: list[Category],
+    test_family: FamilyMember,
+    test_owner_member: FamilyMember,
+) -> None:
+    from bot.db.repository import category as category_repo
+
+    deti = next(c for c in seed_categories if c.name == "Дети")
+    ilya = await category_repo.create_category(
+        db_session,
+        name="Илья",
+        family_id=test_owner_member.family_id,
+        parent_id=deti.id,
+    )
+    await db_session.commit()
+    when = datetime(2026, 5, 10, 12, tzinfo=UTC)
+    await _add_receipt(
+        db_session,
+        member=test_owner_member,
+        when=when,
+        category_id=ilya.id,
+        amount=Decimal("100.00"),
+    )
+    await _add_receipt(
+        db_session,
+        member=test_owner_member,
+        when=when,
+        category_id=deti.id,
+        amount=Decimal("50.00"),
+    )
+    reporter = Reporter(session_factory)
+    rep = await reporter.monthly(test_owner_member, "own", datetime(2026, 5, 15).date())
+    deti_line = next(line for line in rep.lines if line.category_name == "Дети")
+    assert deti_line.total == Decimal("150.00")  # rolled up (parent + child)
+    assert any("Илья" in line.category_name for line in rep.lines)  # expanded
