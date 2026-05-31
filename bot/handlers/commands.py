@@ -231,6 +231,28 @@ async def rate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(update, f"Курс {currency} → KZT установлен: {value}")
 
 
+HELP_TEXT = (
+    "🤖 Семейный финансовый бот — помощь\n\n"
+    "📷 Просто пришлите фото чека (или PDF) — бот распознает позиции, "
+    "категории и сумму. У чека с QR данные берутся из ОФД.\n\n"
+    "Команды:\n"
+    "/report — отчёты по расходам (период, по дням, по категориям, перечень "
+    "покупок; из перечня можно открыть чек и редактировать)\n"
+    "/add — добавить покупку вручную (без чека): выберите категорию и "
+    "пришлите «Название 1500» или просто «1500»\n"
+    "/categories — список категорий\n"
+    "/invite — пригласить участника в семью (только владелец)\n"
+    "/learn <товар> <категория> — запомнить категорию для товара\n"
+    "/rate <валюта> <курс> — задать курс валюты (напр. /rate USD 470)\n"
+    "/start — регистрация / начало\n"
+    "/help — эта справка"
+)
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _reply(update, HELP_TEXT)
+
+
 async def _reply(update: Update, text: str, **kwargs: Any) -> None:
     message = update.effective_message
     if message is not None:

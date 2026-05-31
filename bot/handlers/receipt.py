@@ -20,6 +20,7 @@ from bot.services.classifier import Classifier, ClassifyFn
 from bot.services.dedup import compute_dedup_key
 from bot.services.exchange import ExchangeService
 from bot.services.identifiers import normalize_gtin, normalize_ntin
+from bot.services.money import format_money
 from bot.services.ofd import OfdClient
 from bot.services.qr import decode_qr, parse_ofd_url
 from bot.services.receipt_text import ReceiptTextParser
@@ -312,13 +313,14 @@ def _format_summary(
     cat_by_id: Mapping[int, Category],
 ) -> str:
     shop = vision_data.shop_name or "Магазин"
-    header = (
-        f"🧾 {shop}\nИтого: {vision_data.total_amount:.2f} {vision_data.currency}\n"
-    )
+    currency = vision_data.currency
+    header = f"🧾 {shop}\nИтого: {format_money(vision_data.total_amount, currency)}\n"
     lines = []
     for c in classified:
         cat = cat_by_id.get(c.category_id) if c.category_id is not None else None
         label = f"{cat.emoji} {cat.name}" if cat is not None else "❓ не определено"
         name = c.canonical_name or c.item.name
-        lines.append(f"• {name} — {c.item.total_price:.2f} ({label})")
+        lines.append(
+            f"• {name} — {format_money(c.item.total_price, currency)} ({label})"
+        )
     return header + "\n" + "\n".join(lines)

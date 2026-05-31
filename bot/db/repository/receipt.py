@@ -22,6 +22,7 @@ class ItemRow:
     total_price: Decimal
     category_id: int | None = None
     confidence: float = 0.0
+    is_manual: bool = False
     gtin: str | None = None
     ntin: str | None = None
     original_currency: str | None = None
@@ -32,6 +33,12 @@ class ItemRow:
 @dataclass
 class CategoryTotal:
     category_id: int | None
+    total: Decimal
+
+
+@dataclass
+class DayTotal:
+    day: date
     total: Decimal
 
 
@@ -70,6 +77,7 @@ async def save_receipt_with_items(
             total_price=row.total_price,
             category_id=row.category_id,
             confidence=row.confidence,
+            is_manual=row.is_manual,
             gtin=row.gtin,
             ntin=row.ntin,
             original_currency=row.original_currency,
@@ -154,3 +162,125 @@ async def sum_by_category(
     return [
         CategoryTotal(category_id=row[0], total=Decimal(row[1])) for row in result.all()
     ]
+
+
+async def sum_total(
+    session: AsyncSession, member_ids: list[int], start: date, end: date
+) -> Decimal:
+    """Total paid (sum of receipt.total_amount) over [start, end)."""
+    if not member_ids:
+        return Decimal(0)
+    stmt = select(func.coalesce(func.sum(Receipt.total_amount), 0)).where(
+        Receipt.family_member_id.in_(member_ids),
+        Receipt.purchased_at >= start,
+        Receipt.purchased_at < end,
+    )
+    return Decimal((await session.execute(stmt)).scalar_one())
+
+
+async def sum_by_day(
+    session: AsyncSession, member_ids: list[int], start: date, end: date
+) -> list[DayTotal]:
+    """Sum receipt totals grouped by purchase day over [start, end)."""
+    if not member_ids:
+        return []
+    day = func.date(Receipt.purchased_at)
+    stmt = (
+        select(day, func.coalesce(func.sum(Receipt.total_amount), 0))
+        .where(
+            Receipt.family_member_id.in_(member_ids),
+            Receipt.purchased_at >= start,
+            Receipt.purchased_at < end,
+        )
+        .group_by(day)
+        .order_by(day)
+    )
+    result = await session.execute(stmt)
+    return [DayTotal(day=row[0], total=Decimal(row[1])) for row in result.all()]
+
+
+async def count_receipts(
+    session: AsyncSession, member_ids: list[int], start: date, end: date
+) -> int:
+    if not member_ids:
+        return 0
+    stmt = select(func.count(Receipt.id)).where(
+        Receipt.family_member_id.in_(member_ids),
+        Receipt.purchased_at >= start,
+        Receipt.purchased_at < end,
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def list_receipts(
+    session: AsyncSession,
+    member_ids: list[int],
+    start: date,
+    end: date,
+    *,
+    limit: int,
+    offset: int,
+) -> list[Receipt]:
+    """Receipts over [start, end), newest first, paginated."""
+    if not member_ids:
+        return []
+    stmt = (
+        select(Receipt)
+        .where(
+            Receipt.family_member_id.in_(member_ids),
+            Receipt.purchased_at >= start,
+            Receipt.purchased_at < end,
+        )
+        .order_by(Receipt.purchased_at.desc(), Receipt.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def update_receipt_total(
+    session: AsyncSession, receipt_id: int, total: Decimal
+) -> Receipt | None:
+    result = await session.execute(select(Receipt).where(Receipt.id == receipt_id))
+    receipt = result.scalar_one_or_none()
+    if receipt is None:
+        return None
+    receipt.total_amount = total
+    await session.flush()
+    return receipt
+
+
+async def delete_receipt(session: AsyncSession, receipt_id: int) -> bool:
+    """Delete a receipt and its items (ORM cascade). True if it existed."""
+    receipt = await get_receipt(session, receipt_id)  # selectinload items for cascade
+    if receipt is None:
+        return False
+    await session.delete(receipt)
+    await session.flush()
+    return True
+
+
+async def update_item_price(
+    session: AsyncSession, item_id: int, total_price: Decimal
+) -> ReceiptItem | None:
+    result = await session.execute(select(ReceiptItem).where(ReceiptItem.id == item_id))
+    item = result.scalar_one_or_none()
+    if item is None:
+        return None
+    item.total_price = total_price
+    item.unit_price = total_price / item.quantity if item.quantity else total_price
+    item.is_manual = True
+    await session.flush()
+    return item
+
+
+async def delete_item(session: AsyncSession, item_id: int) -> int | None:
+    """Delete an item; return its receipt_id (for re-rendering), or None."""
+    result = await session.execute(select(ReceiptItem).where(ReceiptItem.id == item_id))
+    item = result.scalar_one_or_none()
+    if item is None:
+        return None
+    receipt_id = item.receipt_id
+    await session.delete(item)
+    await session.flush()
+    return receipt_id

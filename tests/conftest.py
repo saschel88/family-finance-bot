@@ -141,6 +141,7 @@ def make_update(
         query.data = callback_data
         query.answer = AsyncMock()
         query.edit_message_text = AsyncMock()
+        query.edit_message_reply_markup = AsyncMock()
         query.message = MagicMock()
         query.message.reply_text = AsyncMock()
         update.callback_query = query

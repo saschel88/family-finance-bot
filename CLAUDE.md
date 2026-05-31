@@ -429,15 +429,19 @@ ENVIRONMENT=development  # development | production
 ```
 /start                       — register, create Family or join via invite link
 /invite                      — create a one-time invite link (owner only)
-/report                      — current month expenses (own)
-/report family               — current month expenses (whole family)
-/report week                 — current week expenses
+/report                      — interactive reports menu (period × mode × scope):
+                               total / by day / by category / receipt list;
+                               from the list → receipt card → edit (category,
+                               total, date, delete) per receipt/item
+/add                         — manually add a purchase without a receipt
+                               (pick category, then "Name 1500" or just "1500")
 /learn <product> <category>  — force-add a classification rule
 /rate <currency> <rate>      — set exchange rate manually (e.g. /rate USD 450)
 /categories                  — list all categories
 ```
 
-Photo of a receipt — main flow, no command needed.
+Photo of a receipt — main flow, no command needed. Reports/editing UI is
+button-driven; see bot/handlers/reports.py and PRODUCT_PLAN.md §3.1, §3.3.
 
 ---
 

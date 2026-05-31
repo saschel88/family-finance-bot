@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 import anthropic
 from google import genai
+from telegram import BotCommand
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -21,7 +22,7 @@ from bot.core.config import Settings, get_settings
 from bot.core.database import async_session, dispose_engine
 from bot.core.logging import configure_logging, get_logger
 from bot.db.models import Category
-from bot.handlers import commands, receipt
+from bot.handlers import commands, receipt, reports
 from bot.handlers.commands import OnboardingState
 from bot.services.classifier import Classifier, ClassifyFn
 from bot.services.classify_gemini import GeminiClassifier
@@ -128,10 +129,12 @@ def build_application() -> Application:  # type: ignore[type-arg]
 
     application.add_handler(onboarding)
     application.add_handler(CommandHandler("invite", commands.invite))
-    application.add_handler(CommandHandler("report", commands.report))
+    application.add_handler(CommandHandler("report", reports.report_command))
+    application.add_handler(CommandHandler("add", reports.add_command))
     application.add_handler(CommandHandler("categories", commands.categories))
     application.add_handler(CommandHandler("learn", commands.learn))
     application.add_handler(CommandHandler("rate", commands.rate))
+    application.add_handler(CommandHandler("help", commands.help_command))
     application.add_handler(MessageHandler(filters.PHOTO, receipt.photo_handler))
     application.add_handler(
         CallbackQueryHandler(receipt.category_callback, pattern="^cat:")
@@ -139,15 +142,42 @@ def build_application() -> Application:  # type: ignore[type-arg]
     application.add_handler(
         CallbackQueryHandler(receipt.date_callback, pattern="^rdate:")
     )
-    # Manual purchase-date capture runs in a separate group so it never
-    # consumes text destined for the onboarding conversation.
+    application.add_handler(CallbackQueryHandler(reports.rep_callback, pattern="^rep:"))
+    application.add_handler(CallbackQueryHandler(reports.rcp_callback, pattern="^rcp:"))
+    application.add_handler(
+        CallbackQueryHandler(reports.add_cat_callback, pattern="^add:")
+    )
+    # Free-text capture runs in separate groups so each no-ops unless its own
+    # pending state is set (and never steals onboarding text).
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, receipt.date_text_handler),
         group=1,
     )
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, reports.report_text_handler),
+        group=2,
+    )
     application.add_error_handler(_error_handler)
 
     return application
+
+
+_BOT_COMMANDS = [
+    BotCommand("report", "Отчёты по расходам"),
+    BotCommand("add", "Добавить покупку вручную"),
+    BotCommand("categories", "Список категорий"),
+    BotCommand("invite", "Пригласить в семью"),
+    BotCommand("learn", "Запомнить категорию: /learn товар категория"),
+    BotCommand("rate", "Курс валюты: /rate USD 470"),
+    BotCommand("help", "Справка по командам"),
+    BotCommand("start", "Регистрация / начало"),
+]
+
+
+async def _set_commands(application: Application) -> None:  # type: ignore[type-arg]
+    """Register the slash-command menu shown in the Telegram UI."""
+    await application.bot.set_my_commands(_BOT_COMMANDS)
+    logger.info("bot commands set", count=len(_BOT_COMMANDS))
 
 
 async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -169,6 +199,7 @@ async def run() -> None:
             pass
 
     await application.initialize()
+    await _set_commands(application)
     await application.start()
     assert application.updater is not None
     await application.updater.start_polling()

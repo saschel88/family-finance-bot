@@ -387,14 +387,14 @@ async def test_date_callback_sets_relative_date(
     db_session: AsyncSession,
     test_owner_member: FamilyMember,
 ) -> None:
-    from datetime import UTC, datetime
+    from datetime import UTC, datetime, timedelta
     from decimal import Decimal
 
     saved = await receipt_repo.save_receipt_with_items(
         db_session,
         member_id=test_owner_member.id,
         shop_name="Shop",
-        purchased_at=datetime(2026, 5, 30, tzinfo=UTC),
+        purchased_at=datetime(2020, 1, 1, tzinfo=UTC),
         total_amount=Decimal("100"),
         currency="KZT",
         photo_file_id="f",
@@ -411,8 +411,9 @@ async def test_date_callback_sets_relative_date(
     async with session_factory() as session:
         rcpt = await receipt_repo.get_receipt(session, saved.id)
     assert rcpt is not None
-    # purchased_at moved to yesterday (date changed from the seeded value).
-    assert rcpt.purchased_at.date() != datetime(2026, 5, 30).date()
+    # purchased_at set to yesterday (relative to now), independent of today.
+    expected = (datetime.now(UTC) - timedelta(days=1)).date()
+    assert rcpt.purchased_at.date() == expected
 
 
 async def test_date_text_handler_parses_manual_date(
